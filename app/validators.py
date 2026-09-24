@@ -19,10 +19,11 @@ US_STATES = {
 
 SEX_VALUES = ("Male", "Female", "Other", "Decline to Answer")
 
-NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z\\s\\-']{0,49}$")
-ZIP_PATTERN = re.compile(r"^\\d{5}(?:-\\d{4})?$")
-EMAIL_PATTERN = re.compile(r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
-MEMBER_ID_PATTERN = re.compile(r"^[A-Za-z0-9\\-]+$")
+# Hyphen is last in the class so it cannot form a range.
+NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z '.-]{0,49}$")
+ZIP_PATTERN = re.compile(r"^[0-9]{5}(-[0-9]{4})?$")
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+MEMBER_ID_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 class ValidationError(ValueError):
@@ -39,7 +40,7 @@ def normalize_name(value: str, field: str) -> str:
     if not cleaned or len(cleaned) > 50 or not NAME_PATTERN.match(cleaned):
         raise ValidationError(
             field,
-            f"{field} must be 1–50 letters and may include spaces, hyphens, or apostrophes",
+            f"{field} must be 1-50 letters and may include spaces, hyphens, or apostrophes",
         )
     return cleaned
 
@@ -88,9 +89,13 @@ def normalize_sex(value: str) -> str:
     return resolved
 
 
+def _digits_only(value: str) -> str:
+    return "".join(ch for ch in (value or "") if ch.isdigit())
+
+
 def normalize_phone(value: str, field: str = "phone_number") -> str:
     """Strip formatting and require exactly 10 US digits (optionally prefixed with 1)."""
-    digits = re.sub(r"\\D", "", value or "")
+    digits = _digits_only(value)
     if len(digits) == 11 and digits.startswith("1"):
         digits = digits[1:]
     if len(digits) != 10:
@@ -101,7 +106,7 @@ def normalize_phone(value: str, field: str = "phone_number") -> str:
 
 
 def format_phone_display(digits: str) -> str:
-    d = re.sub(r"\\D", "", digits)
+    d = _digits_only(digits)
     if len(d) != 10:
         return digits
     return f"({d[0:3]}) {d[3:6]}-{d[6:10]}"
@@ -143,8 +148,7 @@ def normalize_state(value: str) -> str:
 
 
 def normalize_zip(value: str) -> str:
-    raw = (value or "").strip()
-    digits = re.sub(r"\\D", "", raw)
+    digits = _digits_only(value)
     if len(digits) == 5:
         formatted = digits
     elif len(digits) == 9:
