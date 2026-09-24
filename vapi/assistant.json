@@ -1,0 +1,36 @@
+{
+  "name": "Northstar Patient Intake",
+  "firstMessage": "Hi, you've reached Northstar Family Clinic. This is Maya, and I can register you as a new patient over the phone. To start, what's your first and last name?",
+  "serverUrl": "https://YOUR_PUBLIC_URL/voice/webhook",
+  "model": {
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "system", "content": "Paste SYSTEM_PROMPT from app/voice/prompt.py"}],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "lookup_patient_by_phone",
+          "parameters": {"type": "object", "required": ["phone_number"], "properties": {"phone_number": {"type": "string"}}}
+        },
+        "server": {"url": "https://YOUR_PUBLIC_URL/voice/tools/lookup_patient_by_phone"}
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "create_patient",
+          "parameters": {"type": "object", "required": ["first_name","last_name","date_of_birth","sex","phone_number","address_line_1","city","state","zip_code"], "properties": {"first_name": {"type": "string"}}}
+        },
+        "server": {"url": "https://YOUR_PUBLIC_URL/voice/tools/create_patient"}
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "update_patient",
+          "parameters": {"type": "object", "required": ["patient_id"], "properties": {"patient_id": {"type": "string"}}}
+        },
+        "server": {"url": "https://YOUR_PUBLIC_URL/voice/tools/update_patient"}
+      }
+    ]
+  }
+}
