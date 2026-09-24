@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Patient Registry</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }
+    header { background: #0f172a; color: #fff; padding: 20px 28px; }
+    main { padding: 24px 28px; }
+    input, button { padding: 8px 10px; margin: 0 6px 12px 0; }
+    table { width: 100%; border-collapse: collapse; background: #fff; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e2e8f0; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <header><h1>Northstar Patient Registry</h1></header>
+  <main>
+    <input id="last_name" placeholder="Last name" />
+    <input id="phone_number" placeholder="Phone" />
+    <button onclick="loadPatients()">Filter</button>
+    <div id="table"></div>
+  </main>
+  <script>
+    async function loadPatients() {
+      const params = new URLSearchParams();
+      for (const id of ["last_name", "phone_number"]) {
+        const v = document.getElementById(id).value.trim();
+        if (v) params.set(id, v);
+      }
+      const res = await fetch("/patients" + (params.toString() ? "?" + params : ""));
+      const body = await res.json();
+      const rows = body.data || [];
+      const cols = ["patient_id","first_name","last_name","date_of_birth","sex","phone_number","city","state"];
+      let html = "<table><thead><tr>" + cols.map(c => `<th>${c}</th>`).join("") + "</tr></thead><tbody>";
+      for (const row of rows) html += "<tr>" + cols.map(c => `<td>${row[c] ?? ""}</td>`).join("") + "</tr>";
+      document.getElementById("table").innerHTML = html + "</tbody></table>";
+    }
+    loadPatients();
+  </script>
+</body>
+</html>
