@@ -1,9 +1,4 @@
-"""Deterministic intake agent used when no LLM key is configured.
-
-Accepts free-text answers, extracts what it can, re-prompts only missing or
-invalid fields, supports corrections and start-over, looks up duplicates by
-phone, confirms before write, and talks through API failures.
-"""
+"""Deterministic intake agent used when no LLM key is configured."""
 
 from __future__ import annotations
 
@@ -43,13 +38,15 @@ FIELD_PROMPTS = {
     "first_name": "What's your first name?",
     "last_name": "And your last name?",
     "date_of_birth": "What's your date of birth? Month, day, and year.",
-    "sex": "And how should we record your sex — male, female, other, or decline to answer?",
+    "sex": "And how should we record your sex - male, female, other, or decline to answer?",
     "phone_number": "What's the best 10-digit U.S. phone number to reach you?",
     "address_line_1": "What's your street address?",
     "city": "What city is that in?",
     "state": "Which state?",
     "zip_code": "And the ZIP code?",
 }
+YES_WORDS = {"yes", "yeah", "yep", "correct", "right", "ok", "okay", "sure", "confirm"}
+NO_WORDS = {"no", "nope", "nah", "wrong", "incorrect"}
 SESSIONS: dict[str, "IntakeSession"] = {}
 
 
@@ -74,20 +71,27 @@ def get_or_create_session(session_id: Optional[str], caller_phone: Optional[str]
     return session
 
 
+def _tokens(text: str) -> set[str]:
+    return set(re.findall(r"[A-Za-z']+", (text or "").lower()))
+
+
 def _yes(text: str) -> bool:
-    return bool(re.search(r"\\b(yes|yeah|yep|correct|right|sounds good|that's right|that is right|confirm|ok|okay|sure)\\b", text, re.I))
+    lowered = (text or "").lower()
+    return bool(_tokens(text) & YES_WORDS) or "sounds good" in lowered or "that's right" in lowered
 
 
 def _no(text: str) -> bool:
-    return bool(re.search(r"\\b(no|nope|nah|wrong|incorrect|not quite|start over|start again)\\b", text, re.I))
+    return bool(_tokens(text) & NO_WORDS) or "not quite" in (text or "").lower()
 
 
 def _wants_start_over(text: str) -> bool:
-    return bool(re.search(r"\\b(start over|start again|reset|from the beginning)\\b", text, re.I))
+    lowered = (text or "").lower()
+    return "start over" in lowered or "start again" in lowered or "from the beginning" in lowered
 
 
 def _wants_spanish(text: str) -> bool:
-    return bool(re.search(r"hablo espa[nñ]ol|en espa[nñ]ol|speak spanish", text, re.I))
+    lowered = (text or "").lower()
+    return "hablo espanol" in lowered or "hablo espanol" in lowered.replace("n", "n") or "speak spanish" in lowered or "en espanol" in lowered or "espanol" in lowered
 
 
 def _next_missing(session: IntakeSession) -> Optional[str]:
@@ -97,12 +101,16 @@ def _next_missing(session: IntakeSession) -> Optional[str]:
     return None
 
 
+def _has_digit(text: str) -> bool:
+    return any(ch.isdigit() for ch in text)
+
+
 def handle_turn(db: Session, session: IntakeSession, user_text: str) -> dict:
     text = (user_text or "").strip()
     session.transcript.append(f"user: {text}")
     if _wants_spanish(text):
         session.language = "es"
-        return _say(session, "Claro. Podemos continuar en español. ¿Cuál es su nombre y apellido?")
+        return _say(session, "Claro. Podemos continuar en espanol. Cual es su nombre y apellido?")
     if _wants_start_over(text):
         session.fields, session.phase, session.existing, session.update_mode = {}, "collect", None, False
         return _say(session, "No problem. We'll start fresh. What's your first and last name?")
@@ -120,7 +128,8 @@ def handle_turn(db: Session, session: IntakeSession, user_text: str) -> dict:
             session.existing = None
         if session.existing and not session.update_mode:
             session.phase = "duplicate"
-            return _say(session, f"It looks like we already have a record for {session.existing['first_name']} {session.existing['last_name']}. Would you like to update your information instead?")
+            existing = session.existing
+            return _say(session, f"It looks like we already have a record for {existing['first_name']} {existing['last_name']}. Would you like to update your information instead?")
     if session.phase == "duplicate":
         if _yes(text):
             session.update_mode, session.phase = True, "collect"
@@ -135,9 +144,9 @@ def handle_turn(db: Session, session: IntakeSession, user_text: str) -> dict:
     missing = _next_missing(session)
     if missing:
         reply = FIELD_PROMPTS[missing]
-        if missing == "date_of_birth" and re.search(r"\\d", text):
+        if missing == "date_of_birth" and _has_digit(text):
             reply = "I need a real date of birth that isn't in the future, like March 4th 1988."
-        if missing == "phone_number" and re.search(r"\\d", text):
+        if missing == "phone_number" and _has_digit(text):
             reply = "That number doesn't look like a 10-digit U.S. phone number. Can you say it again with the area code?"
         return _say(session, reply)
     session.phase = "optional_offer"
@@ -160,7 +169,8 @@ def _handle_confirm(db: Session, session: IntakeSession, text: str) -> dict:
     try:
         if session.update_mode and session.existing:
             patient = svc.update_patient(
-                db, session.existing["patient_id"],
+                db,
+                session.existing["patient_id"],
                 PatientUpdate(**{k: v for k, v in session.fields.items() if v is not None}),
             )
             outcome = "updated"
@@ -168,14 +178,23 @@ def _handle_confirm(db: Session, session: IntakeSession, text: str) -> dict:
             patient = svc.create_patient(db, PatientCreate(**session.fields))
             outcome = "created"
     except Exception as exc:  # noqa: BLE001
-        svc.log_call(db, outcome="write_failed", payload_json=json.dumps(session.fields, default=str),
-                     transcript="\\n".join(session.transcript),
-                     caller_phone=session.fields.get("phone_number") or session.caller_phone)
+        svc.log_call(
+            db,
+            outcome="write_failed",
+            payload_json=json.dumps(session.fields, default=str),
+            transcript=chr(10).join(session.transcript),
+            caller_phone=session.fields.get("phone_number") or session.caller_phone,
+        )
         return _say(session, "I wasn't able to save that just now. A coordinator will follow up. I'm sorry for the trouble.", error=str(exc))
     session.phase = "done"
-    svc.log_call(db, outcome=outcome, payload_json=json.dumps(patient, default=str),
-                 transcript="\\n".join(session.transcript), patient_id=patient["patient_id"],
-                 caller_phone=patient.get("phone_number") or session.caller_phone)
+    svc.log_call(
+        db,
+        outcome=outcome,
+        payload_json=json.dumps(patient, default=str),
+        transcript=chr(10).join(session.transcript),
+        patient_id=patient["patient_id"],
+        caller_phone=patient.get("phone_number") or session.caller_phone,
+    )
     return _say(session, f"You're all set, {patient['first_name']}. You're registered. Thank you for calling Northstar.", patient=patient, saved=True)
 
 
@@ -184,28 +203,39 @@ def _summary(session: IntakeSession) -> str:
     dob = f.get("date_of_birth")
     dob_s = dob.strftime("%m/%d/%Y") if hasattr(dob, "strftime") else str(dob)
     phone = format_phone_display(str(f.get("phone_number", "")))
-    return f"{f.get('first_name')} {f.get('last_name')}; born {dob_s}; sex {f.get('sex')}; phone {phone}; address {f.get('address_line_1')} {f.get('city')}, {f.get('state')} {f.get('zip_code')}"
+    return (
+        f"{f.get('first_name')} {f.get('last_name')}; born {dob_s}; sex {f.get('sex')}; "
+        f"phone {phone}; address {f.get('address_line_1')} {f.get('city')}, {f.get('state')} {f.get('zip_code')}"
+    )
 
 
 def _extract_into(session: IntakeSession, text: str) -> None:
     raw = text.strip()
-    tokens = [t for t in re.split(r"\\s+", raw) if t]
-    if 2 <= len(tokens) <= 4 and all(re.match(r"^[A-Za-z][A-Za-z\\-']*$", t) for t in tokens):
-        if not re.search(r"\\b(yes|no|male|female|street|avenue|apt)\\b", raw, re.I):
-            try:
-                session.fields.setdefault("first_name", normalize_name(tokens[0], "first_name"))
-                session.fields.setdefault("last_name", normalize_name(tokens[-1], "last_name"))
-            except ValidationError:
-                pass
-    dob = re.search(r"\\b(\\d{1,2}[/-]\\d{1,2}[/-]\\d{4})\\b", raw)
-    if dob:
+    words = [part for part in raw.replace(",", " ").split() if part]
+    name_like = all(re.fullmatch(r"[A-Za-z][A-Za-z'-]*", w or "") for w in words) if words else False
+    blocked = {"yes", "no", "male", "female", "street", "avenue", "apt"}
+    if 2 <= len(words) <= 4 and name_like and not (_tokens(raw) & blocked):
         try:
-            session.fields["date_of_birth"] = parse_date_of_birth(dob.group(1))
+            session.fields.setdefault("first_name", normalize_name(words[0], "first_name"))
+            session.fields.setdefault("last_name", normalize_name(words[-1], "last_name"))
         except ValidationError:
             pass
-    spoken = re.search(r"\\b(january|february|march|april|may|june|july|august|september|october|november|december)\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})\\b", raw, re.I)
+    date_match = re.search(r"([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{4})", raw)
+    if date_match:
+        try:
+            session.fields["date_of_birth"] = parse_date_of_birth(date_match.group(1))
+        except ValidationError:
+            pass
+    spoken = re.search(
+        r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+([0-9]{1,2})(?:st|nd|rd|th)?,?\s+([0-9]{4})",
+        raw,
+        re.I,
+    )
     if spoken:
-        months = {"january":1,"february":2,"march":3,"april":4,"may":5,"june":6,"july":7,"august":8,"september":9,"october":10,"november":11,"december":12}
+        months = {
+            "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+            "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+        }
         try:
             stamp = f"{months[spoken.group(1).lower()]:02d}/{int(spoken.group(2)):02d}/{spoken.group(3)}"
             session.fields["date_of_birth"] = parse_date_of_birth(stamp)
@@ -215,7 +245,7 @@ def _extract_into(session: IntakeSession, text: str) -> None:
         session.fields["sex"] = normalize_sex(raw)
     except ValidationError:
         pass
-    phone = re.search(r"(\\+?1[\\s.-]?)?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}", raw)
+    phone = re.search(r"(?:[+]?1[ .-]?)?[(]?[0-9]{3}[)]?[ .-]?[0-9]{3}[ .-]?[0-9]{4}", raw)
     if phone:
         try:
             session.fields["phone_number"] = normalize_phone(phone.group(0))
@@ -225,20 +255,26 @@ def _extract_into(session: IntakeSession, text: str) -> None:
         session.fields["state"] = normalize_state(raw)
     except ValidationError:
         pass
-    zip_match = re.search(r"\\b(\\d{5}(?:-\\d{4})?)\\b", raw)
+    zip_match = re.search(r"\b([0-9]{5}(?:-[0-9]{4})?)\b", raw)
     if zip_match:
         try:
             session.fields["zip_code"] = normalize_zip(zip_match.group(1))
         except ValidationError:
             pass
-    if _next_missing(session) == "address_line_1" and re.search(r"\\d+\\s+\\w+", raw):
+    if _next_missing(session) == "address_line_1" and re.search(r"[0-9]+\s+[A-Za-z]", raw):
         addr = normalize_optional_text(raw, "address_line_1", 200)
         if addr:
             session.fields["address_line_1"] = addr
-    if _next_missing(session) == "city" and re.match(r"^[A-Za-z][A-Za-z\\s\\-']+$", raw):
+    if _next_missing(session) == "city" and re.fullmatch(r"[A-Za-z][A-Za-z '-]+", raw):
         city = normalize_optional_text(raw, "city", 100)
         if city:
             session.fields["city"] = city
+    email = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", raw)
+    if email:
+        try:
+            session.fields["email"] = normalize_email(email.group(0))
+        except ValidationError:
+            pass
 
 
 def _say(session: IntakeSession, reply: str, **extra: Any) -> dict:
